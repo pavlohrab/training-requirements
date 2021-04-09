@@ -1,0 +1,412 @@
+---
+title: "Data Analysis"
+author: "Pavlo Hrab"
+date: "4/8/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Read the data 
+Firstly, we load the datasets and required libraries
+
+```{r cars, echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE}
+# Load libraries
+library(tidyverse)
+library(ggplot2)
+library(ggpubr)
+library(car)
+library(plotly)
+
+# Read the data
+df <- as.tibble(read.csv("gapminder_clean.csv", row.names =1))
+```
+
+# Walkthrough analysis
+## Filter the data, to include only year 1962
+
+```{r pressure, echo=TRUE}
+df_1962 <- df %>%
+  dplyr::filter(Year==1962)
+```
+
+## Plot the correlation
+```{r echo=FALSE}
+df_1962 %>%
+  transmute(percap = gdpPercap, CO2 = CO2.emissions..metric.tons.per.capita.) %>%
+  drop_na(percap, CO2) %>%
+  ggplot(aes(x = CO2, y=percap)) +
+  geom_point() +
+  xlab("CO2 emissions") +
+  ylab("gdpPercap")
+```
+
+The plot above shows a correlation between selected values. Therefore, we are conducting pearson's r calculation for them
+```{r}
+cor.test(df_1962$gdpPercap, df_1962$CO2.emissions..metric.tons.per.capita., method = "pearson")
+```
+The calculation suggests, a strong positive correlation between gdpPercap and CO2 emissions with r=0.9260817 and p-value = 2.2e-16.
+
+## Find the correlation across all years
+
+
+```{r}
+# Get all the years (time point) from a dataframe
+years <- unique(df$Year)
+# Calculate the correlation and store in a list (with years) for all year
+res <- lapply(years, function(x){
+  filt_df <- df %>%
+    filter(Year==x) %>%
+    transmute(percap= gdpPercap, co2=CO2.emissions..metric.tons.per.capita.) %>%
+    drop_na()
+  corr <- cor.test(filt_df$percap, filt_df$co2, method = "pearson")
+  list(x,as.numeric(corr$estimate))
+})
+# Make a vector from a corrs
+corrs <- sapply(res, function(x){
+  x[[2]]
+})
+# Find the year, which holds a max pearson's r. 
+max_year <- sapply(res, function(x){
+  if (x[[2]] == max(corrs) ){
+    x[[1]]
+  }
+})
+# Clean NULL elements from an above list. The max year is just a number now
+max_year <- as.numeric(max_year[lengths(max_year) != 0] )
+```
+
+Therefore we have the max year stored in a variable `max_year` (=1967). 
+Then we are constructing an interactive plot, using this year as a filter.
+
+```{r echo=FALSE}
+g <- df %>%
+  filter(Year==max_year) %>%
+  transmute(percap=gdpPercap, co2=CO2.emissions..metric.tons.per.capita., pop=pop, continent=continent) %>%
+  drop_na(percap, co2, pop, continent) %>%
+  filter(continent!="") %>%
+  ggplot(aes(y=percap, x=co2)) +
+  geom_point(aes(size=pop, color=continent)) +
+  xlab("CO2 emissions") +
+  ylab("gdpPerCap") 
+ggplotly(g)
+```
+
+# Exploratory data analysis without an instruction
+## Relationship between `continent` and `Energy use` variables
+The first thing, first - we should plot the data to get the know it
+
+```{r echo=FALSE}
+g <- df %>%
+  transmute(continent=continent, energy=Energy.use..kg.of.oil.equivalent.per.capita.) %>%
+  drop_na() %>%
+  filter(continent != "") %>%
+  ggplot(aes(x=continent, y=energy, fill=continent)) +
+  geom_boxplot()+
+  geom_jitter(color="black", size=0.2, alpha=0.7) +
+  ggtitle("Energy use across continents from 1962 till 2007") +
+  xlab("Continent") +
+  ylab("Energy use")
+ggplotly(g)
+```
+
+### Stats
+The plot suggests that we have one categorical variable and one quantitive The best statistical test for this kind of problem is ANOVA test. 
+However there are several assumptions, we need to secure before applying test
+1. Observations obtained independly and randomly
+2. The data of each factor level is normally distributed
+3. These populations have common variance
+
+The first assumption is secured, we assume that these variables obtained independently and randomly. For the rest, we should run some tests
+
+Let's filter the data for the tests
+```{r}
+df_energy <- df %>%
+  transmute(continent=continent, energy=Energy.use..kg.of.oil.equivalent.per.capita.) %>%
+  drop_na() %>%
+  filter(continent != "")
+```
+
+
+#### Check the variance homogenuity
+To test this assumption, we would use Levene's test from car package, because it's less sensitive to departures from normal distribution, than the analogous Bartlett’s test
+```{r}
+leveneTest(energy ~ continent, data=df_energy)
+```
+The null hypothesis in Levene's test is that groups have common variance. We just broke it with p-value 8e-10. Therefore we cannot assume that the variance is common between population
+
+### Check if population have normal distribution
+We should also check if the data is normally distributed between continents. For that we should use Shapiro-Wilk test. 
+
+```{r}
+continents <-  unique(df_energy %>% select(continent))$continent
+
+res <- lapply(continents, function(x){
+  df_tmp <- df_energy %>%
+    filter(continent==x)
+  list(shapiro.test(df_tmp$energy), x)
+  })
+
+for (i in res){
+  print(paste(i[[2]], "have W: ", i[[1]]$statistic, " with p-value ", i[[1]]$p.value))
+}
+```
+The data above suggest, that the normality assumption is violated. However, the Shapiro-Wilk test tends to pinpoint the slightest normality violation, if the data is big (>50 variables). Therefore, it always better to check with QQ-plots
+```{r echo=FALSE}
+ggqqplot(df_energy, x = "energy", facet.by = "continent")
+```
+
+The QQ-plots aligns with the results of the shapiro-wilk test. The only data for the Oceania have normal distribution.
+Just to be sure, let's print the stats for each continent
+```{r}
+group_by(df_energy, continent) %>%
+  summarise(
+    count = n(),
+    mean = mean(energy, na.rm = TRUE),
+    median=median(energy, na.rm = TRUE),
+    sd = sd(energy, na.rm = TRUE)
+  )
+```
+The small amount of data partly explains the Oceania normality. Given that the Energy use grow with the passage of time, we expect non-normal distribution across 10 years.
+
+So, we should non-parametric tests instead. The analogous to ANOVA non-parametric test is Kruskal-Wallis test
+```{r}
+kruskal.test(energy ~ continent, data = df_energy)
+```
+The Kruskal-wallis test us, that there is an statistically significant difference in medians with the populations. However we haven't compared them pairwise. Because the normality assumption for 4 out of 5 groups is violated we could use pairwise comparisons with Wilcoxon rank sum test.
+
+```{r}
+pairwise.wilcox.test(df_energy$energy, df_energy$continent,
+                 p.adjust.method = "BH")
+```
+The results above suggest, that there is a significant difference in energy use over the 10 time points for 5 continents. The only not significant difference with p-value of 0.09746 is between Asia and Americas.
+
+Let's plot the final plot with all the stats included
+```{r echo=FALSE}
+my_comparisons <-  combn( continents , 2 )
+
+df %>%
+  transmute(continent=continent, energy=Energy.use..kg.of.oil.equivalent.per.capita.) %>%
+  drop_na() %>%
+  filter(continent != "") %>%
+  ggplot(aes(x=continent, y=energy, fill=continent)) +
+  geom_boxplot()+
+  geom_jitter(color="black", size=0.2, alpha=0.7) +
+  ggtitle("Energy use across continents from 1962 till 2007") +
+  xlab("Continent") +
+  ylab("Energy use") +
+  stat_compare_means(method = "kruskal.test", label.x = 1, label.y = 31000) +
+  stat_compare_means(comparisons = as.list(as.data.frame(my_comparisons)))
+```
+
+
+##Imports of goods and services analysis
+
+The point of this analysis is to check whether there is a significant difference in terms of imports between Europe and Asia in years after 1990
+Let's filter the data first
+```{r}
+df_1990 <- df %>%
+  filter(Year>1990) %>%
+  transmute(continent=continent,import=Imports.of.goods.and.services....of.GDP. ) %>%
+  filter(continent=="Asia" | continent=="Europe") %>%
+  drop_na()
+```
+
+Let's create a simple boxplot to get the sense of a data
+
+```{r echo=FALSE}
+g <- df_1990 %>%
+  ggplot(aes(x=continent, y=import, fill=continent)) +
+  geom_boxplot()+
+  geom_jitter(color="black", size=0.2, alpha=0.7) +
+  ggtitle("Energy use across continents from 1990 till 2007") +
+  xlab("Continent") +
+  ylab("Energy use")
+ggplotly(g)
+```
+
+We have two groups, and we check the difference between them. We cannot use one-sample t-test, because the groups are independent, there are no reference to compare one of them. Therefore, the Unpaired Two-Samples T-test is a better option. But we first need to meet the assumption for this parametric test:
+1. Normal distribution within groups
+2. Variance in these groups is equal
+
+Let's perform the normality check using shapiro-wilk test and using QQ-plot
+```{r}
+continents <-  unique(df_1990 %>% select(continent))$continent
+
+res <- lapply(continents, function(x){
+  df_tmp <- df_1990 %>%
+    filter(continent==x)
+  list(shapiro.test(df_tmp$import), x)
+  })
+
+for (i in res){
+  print(paste(i[[2]], "have W: ", i[[1]]$statistic, " with p-value ", i[[1]]$p.value))
+}
+```
+```{r echo=FALSE}
+ggqqplot(df_1990, x = "import", facet.by = "continent")
+```
+And let's explore the basic stats for each group
+```{r}
+group_by(df_1990, continent) %>%
+  summarise(
+    count = n(),
+    mean = mean(import, na.rm = TRUE),
+    median=median(import, na.rm = TRUE),
+    sd = sd(import, na.rm = TRUE)
+  )
+```
+
+We can see, that the normality assumption is violated. Shapiro-Wilk test gave the p<0.05 for each group. Given the sensitivity of this test, we plotted the QQ-plot, which, unfortunately, confirms the violation of this assumption.
+
+Then let's If the variances are equal between groups 
+```{r}
+var.test(import ~ continent, data = df_1990)
+```
+As we see, the homogeneity of the variances rule is also violated (p-value<<0.05)
+
+So, then we should use the non-parametric alternative, which is Unpaired Two-Samples Wilcoxon Test.
+
+```{r}
+wilcox.test(import~continent,data=df_1990, alternative = "two.sided")
+```
+Well, the difference between two groups is not statistically significant (p-value=0.7867).
+
+And the final visualization^
+
+```{r echo=FALSE}
+df_1990 %>%
+  ggplot(aes(x=continent, y=import, fill=continent)) +
+  geom_boxplot()+
+  geom_jitter(color="black", size=0.2, alpha=0.7) +
+  ggtitle("Energy use across continents from 1990 till 2007") +
+  xlab("Continent") +
+  ylab("Energy use")+
+  stat_compare_means(comparisons = list(c("Asia", "Europe")))
+```
+
+
+## Highest Population density across coutries
+
+Let's transform the initial data, to save only population density, country and year
+
+```{r}
+df_pop <- df%>%
+  transmute(year=Year, country=Country.Name, pop_den=Population.density..people.per.sq..km.of.land.area.) %>%
+  drop_na()
+```
+
+
+Let's take a look at a data with an interactive plot.
+
+```{r echo=FALSE}
+g <- df_pop %>%
+  ggplot(aes(x=year, y=pop_den, group=country))+
+  geom_line() +
+  xlab("Years") +
+  ylab("Population density")+
+  ggtitle("Population density over years for countries")
+ggplotly(g)
+```
+
+We could tell right away, that the highest population density across all years is `Macao SAR, China` or `Monaco`. However, we cannot tell which a winner across all years.
+
+
+
+```{r}
+# Get unique counties and years to a vectors
+countries <- unique(df_pop$country)
+years <- unique(df_pop$year)
+# Make an empty dataframe with countries, which we will populate
+coutry_rank <- as.data.frame(unique(df_pop$country))
+colnames(coutry_rank) <- "country"
+# Iterate over years, rank the population density, add ranks to a dataframe
+for (i in years){
+  df_tmp <- df_pop %>%
+    filter(year==i) 
+  
+  order(df_tmp$pop_den)
+  data_ranked <- as.data.frame(cbind(df_tmp$country, as.numeric(rank(df_tmp$pop_den))))
+  coutry_rank <- cbind(coutry_rank, as.numeric(data_ranked[match(coutry_rank$country, data_ranked$V1), ]$V2))
+}
+# Rename columns
+colnames(coutry_rank) <- c("country", years)
+# Construct a matrix out of dataframe only with numbers (to compute mean)
+rank_matrix <- coutry_rank %>%
+  select(-country) %>%
+  as.matrix()
+coutry_rank <- cbind(coutry_rank, rowMeans(rank_matrix))
+coutry_rank[is.na(coutry_rank)] = 0
+colnames(coutry_rank) <- c("country", years, 'average')
+
+# Print the rows of a dataframe with the highest rank (the bigger, the better)
+coutry_rank %>%
+  filter(average==max(average))
+```
+
+So, then we conclude, that the countries, that have the highest population density over years are `Macao SAR, China` and `Monaco`.
+
+## Life expectancy increase
+
+At first filter the data. Select years, life expectancy, country
+```{r}
+df_life <- df %>%
+  transmute(year=Year, country=Country.Name, life=Life.expectancy.at.birth..total..years.) %>%
+  drop_na()
+
+```
+
+Look at the data.
+```{r echo=FALSE}
+g <- df_life %>%
+  ggplot(aes(x=year, y=life, group=country))+
+  geom_line() +
+  xlab("Years") +
+  ylab("Life expectancy")+
+  ggtitle("Life expectancy over years for countries")
+ggplotly(g)
+```
+
+The plot is less than informative. We should pinpoint the greatest increase in life expectancy since 1962. In other words, the greatest difference between 2007 and 1962. Let's compute it
+```{r}
+df_life <- df_life %>%
+  pivot_wider(names_from = year, values_from=life)
+
+matrx <- df_life %>%
+  select(-country)
+
+res <- apply(matrx, 1, function(x){
+  lst <- x[!is.na(x)]
+  diffs <- lst[length(lst)]-lst[1]
+  diffs
+})
+
+df_life$diff <- res
+top_diffs <- filter(df_life, diff %in% sort(df_life$diff, decreasing = T)[1:10])[c(1,2,11,12)]
+top_diffs
+```
+
+Lets make the plot one more time, but color the top countries this time
+
+```{r echo=FALSE}
+df_life <- df %>%
+  transmute(year=Year, country=Country.Name, life=Life.expectancy.at.birth..total..years.) %>%
+  drop_na()
+g <- df_life %>%
+  mutate(color=ifelse(country %in% top_diffs$country,1,0)) %>%
+  ggplot(aes(x=year, y=life, group=country, color=color))+
+  geom_line() +
+  xlab("Years") +
+  ylab("Life expectancy")+
+  ggtitle("Life expectancy over years for top rating countries")
+ggplotly(g)
+```
+
+
+
+
+
